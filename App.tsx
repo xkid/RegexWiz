@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { generateRegexFromPrompt } from './services/geminiService';
+import * as audioStorage from './services/audioStorage';
 import MatchHighlighter from './components/MatchHighlighter';
 import { RegexResult } from './types';
 import { 
@@ -16,7 +17,9 @@ import {
   Settings,
   Upload,
   Trash2,
-  X
+  X,
+  Music,
+  SkipForward
 } from 'lucide-react';
 
 const SAMPLE_DATA = `2023-10-27 10:00:01 [INFO] User login: alice_doe (IP: 192.168.1.45)
@@ -25,9 +28,6 @@ const SAMPLE_DATA = `2023-10-27 10:00:01 [INFO] User login: alice_doe (IP: 192.1
 2023-10-27 10:15:00 [INFO] User logout: alice_doe`;
 
 const DEFAULT_MUSIC_URL = "/bnova.mp3";
-const STORAGE_KEY = "custom_bg_music";
-// 2.5MB limit to be safe with localStorage 5MB limit (Base64 is ~33% larger)
-const MAX_FILE_SIZE = 2.5 * 1024 * 1024; 
 
 export default function App() {
   const [inputData, setInputData] = useState<string>(SAMPLE_DATA);
@@ -38,24 +38,46 @@ export default function App() {
   const [copied, setCopied] = useState<boolean>(false);
   
   // Audio state
-  const [musicSrc, setMusicSrc] = useState<string>(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEY) || DEFAULT_MUSIC_URL;
-    } catch (e) {
-      return DEFAULT_MUSIC_URL;
-    }
-  });
+  const [playlist, setPlaylist] = useState<audioStorage.TrackMetadata[]>([]);
+  const [currentTrackIndex, setCurrentTrackIndex] = useState<number>(0);
+  const [musicSrc, setMusicSrc] = useState<string>(DEFAULT_MUSIC_URL);
   const [isMusicPlaying, setIsMusicPlaying] = useState<boolean>(false);
   const [audioError, setAudioError] = useState<boolean>(false);
+  
+  // Refs to manage audio object URLs and element
   const audioRef = useRef<HTMLAudioElement>(null);
+  const currentBlobUrlRef = useRef<string | null>(null);
 
   // Settings Modal State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isPlaylistLoading, setIsPlaylistLoading] = useState(false);
   
   // To handle manual edits to the generated regex
   const [manualRegex, setManualRegex] = useState<string>("");
   const [manualFlags, setManualFlags] = useState<string>("gm");
+
+  // Load playlist on mount
+  useEffect(() => {
+    const loadPlaylist = async () => {
+      try {
+        const tracks = await audioStorage.getPlaylistMetadata();
+        setPlaylist(tracks);
+      } catch (e) {
+        console.error("Failed to load playlist", e);
+      }
+    };
+    loadPlaylist();
+  }, []);
+
+  // Cleanup object URLs on unmount
+  useEffect(() => {
+    return () => {
+      if (currentBlobUrlRef.current) {
+        URL.revokeObjectURL(currentBlobUrlRef.current);
+      }
+    };
+  }, []);
 
   const handleGenerate = async () => {
     if (!inputData.trim() || !userPrompt.trim()) {
@@ -86,84 +108,183 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const toggleMusic = () => {
-    if (audioRef.current) {
-      if (audioError) {
-        audioRef.current.load();
-        setAudioError(false);
-      }
+  // --- Audio Logic ---
 
-      if (isMusicPlaying) {
-        audioRef.current.pause();
-        setIsMusicPlaying(false);
-      } else {
-        const playPromise = audioRef.current.play();
-        if (playPromise !== undefined) {
-          playPromise
-            .then(() => {
-              setIsMusicPlaying(true);
-              setError(null);
-            })
-            .catch(() => {
-              console.error("Playback failed.");
-              setError("Failed to play music.");
-              setIsMusicPlaying(false);
-            });
-        }
-      }
-    }
-  };
+  const playTrackAtIndex = async (index: number) => {
+    if (!audioRef.current) return;
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.type !== "audio/mpeg" && file.type !== "audio/mp3") {
-      setUploadError("Please upload a valid MP3 file.");
-      return;
-    }
-
-    if (file.size > MAX_FILE_SIZE) {
-      setUploadError(`File is too large (${(file.size / 1024 / 1024).toFixed(2)}MB). Max size is 2.5MB for local storage.`);
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const result = event.target?.result as string;
-      try {
-        localStorage.setItem(STORAGE_KEY, result);
-        setMusicSrc(result);
-        setUploadError(null);
-        // Stop playing if changing track
-        if (isMusicPlaying && audioRef.current) {
-          audioRef.current.pause();
-          setIsMusicPlaying(false);
-        }
-        setAudioError(false);
-      } catch (err) {
-        console.error("Storage error:", err);
-        setUploadError("Storage quota exceeded. The file is too large to save in your browser.");
-      }
-    };
-    reader.onerror = () => {
-        setUploadError("Failed to read file.");
-    }
-    reader.readAsDataURL(file);
-  };
-
-  const handleResetMusic = () => {
     try {
-      localStorage.removeItem(STORAGE_KEY);
-      setMusicSrc(DEFAULT_MUSIC_URL);
-      setUploadError(null);
-      if (isMusicPlaying && audioRef.current) {
-        audioRef.current.pause();
-        setIsMusicPlaying(false);
+      // If playlist is empty, use default
+      if (playlist.length === 0) {
+        setMusicSrc(DEFAULT_MUSIC_URL);
+        setCurrentTrackIndex(0);
+      } else {
+        // Bounds check
+        const safeIndex = index % playlist.length;
+        const track = playlist[safeIndex];
+        
+        // Fetch blob from DB
+        const blob = await audioStorage.getTrackBlob(track.id);
+        
+        if (blob) {
+          // Revoke old URL to prevent memory leaks
+          if (currentBlobUrlRef.current) {
+            URL.revokeObjectURL(currentBlobUrlRef.current);
+          }
+          
+          const newUrl = URL.createObjectURL(blob);
+          currentBlobUrlRef.current = newUrl;
+          setMusicSrc(newUrl);
+          setCurrentTrackIndex(safeIndex);
+        } else {
+          console.error("Track blob not found, skipping");
+          playNextTrack(); // Skip broken track
+          return;
+        }
       }
+
+      // Reset error state and play
       setAudioError(false);
+      // We need to wait for state update to propagate to <audio src>, 
+      // but usually setting src prop works. 
+      // However, we must call .load() if we are changing src dynamically while playing.
+      // React handles the prop change, but we trigger play after a short delay or effect
+      // to ensure the element is ready.
+      
+      // Let's rely on an effect listening to musicSrc changes to trigger play if isMusicPlaying is true
     } catch (e) {
-      setUploadError("Failed to reset settings.");
+      console.error("Error playing track:", e);
+      setAudioError(true);
+    }
+  };
+
+  // Effect to play audio when src changes if it was already playing
+  useEffect(() => {
+    if (isMusicPlaying && audioRef.current) {
+      audioRef.current.load(); // Reload with new source
+      const playPromise = audioRef.current.play();
+      if (playPromise) {
+        playPromise.catch(e => {
+            console.error("Auto-play failed after track change", e);
+            // Don't stop playing state, let user retry or next track logic handle it
+        });
+      }
+    }
+  }, [musicSrc]);
+
+  const toggleMusic = async () => {
+    if (!audioRef.current) return;
+
+    if (isMusicPlaying) {
+      audioRef.current.pause();
+      setIsMusicPlaying(false);
+    } else {
+      // If starting for the first time and we have a playlist but src is still default
+      // check if we need to load the first track from DB
+      if (playlist.length > 0 && musicSrc === DEFAULT_MUSIC_URL && currentTrackIndex === 0) {
+          await playTrackAtIndex(0);
+      }
+      
+      const playPromise = audioRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            setIsMusicPlaying(true);
+            setAudioError(false);
+          })
+          .catch((e) => {
+            console.error("Playback failed", e);
+            // If failed, maybe try loading first track again properly if it was a source issue
+            if (playlist.length > 0) {
+                 playTrackAtIndex(0).then(() => {
+                     // Try playing again after loading
+                     audioRef.current?.play().then(() => {
+                         setIsMusicPlaying(true);
+                         setAudioError(false);
+                     }).catch(err => {
+                         console.error("Retry playback failed", err);
+                         setAudioError(true);
+                         setIsMusicPlaying(false);
+                     });
+                 });
+            } else {
+                setAudioError(true);
+                setIsMusicPlaying(false);
+            }
+          });
+      }
+    }
+  };
+
+  const playNextTrack = () => {
+    const nextIndex = (currentTrackIndex + 1) % (playlist.length || 1);
+    playTrackAtIndex(nextIndex);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setUploadError(null);
+    setIsPlaylistLoading(true);
+
+    let addedCount = 0;
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (file.type !== "audio/mpeg" && file.type !== "audio/mp3") {
+           // Skip invalid files or warn? Let's skip silently for bulk upload simplicity, or warn once.
+           continue;
+        }
+        await audioStorage.addTrack(file);
+        addedCount++;
+      }
+      
+      // Refresh playlist
+      const tracks = await audioStorage.getPlaylistMetadata();
+      setPlaylist(tracks);
+      
+      // If we went from 0 to >0 tracks, switch to the first track immediately if playing default
+      if (playlist.length === 0 && tracks.length > 0 && isMusicPlaying) {
+          playTrackAtIndex(0);
+      }
+
+    } catch (err) {
+      console.error("Upload failed", err);
+      setUploadError("Failed to save some files to database.");
+    } finally {
+      setIsPlaylistLoading(false);
+      // Reset input
+      e.target.value = '';
+    }
+  };
+
+  const handleDeleteTrack = async (id: string) => {
+    try {
+      await audioStorage.deleteTrack(id);
+      const updatedPlaylist = await audioStorage.getPlaylistMetadata();
+      setPlaylist(updatedPlaylist);
+      
+      // If we deleted the current playing track, play next (or prev, or stop)
+      // For simplicity, if playlist becomes empty, reset to default.
+      if (updatedPlaylist.length === 0) {
+          setMusicSrc(DEFAULT_MUSIC_URL);
+          setCurrentTrackIndex(0);
+      } else {
+          // Adjust index if needed? 
+          // If we deleted a track before current index, decrement index
+          // If we deleted current track, play the new track at this index (which was next)
+          // For now, let's just trigger play at current index (which is now the next song)
+          // If index is out of bounds (deleted last song), wrap to 0
+          if (currentTrackIndex >= updatedPlaylist.length) {
+              playTrackAtIndex(0);
+          } else {
+              // Reload current index (it's a different song now)
+              playTrackAtIndex(currentTrackIndex);
+          }
+      }
+    } catch (e) {
+      console.error("Delete failed", e);
     }
   };
 
@@ -179,7 +300,10 @@ export default function App() {
     }
   }, [manualRegex, manualFlags, inputData]);
 
-  const isCustomMusic = musicSrc !== DEFAULT_MUSIC_URL;
+  // Determine display name for current track
+  const currentTrackName = playlist.length > 0 
+    ? playlist[currentTrackIndex]?.name 
+    : "Default (bnova.mp3)";
 
   return (
     <div className="min-h-screen bg-[#0d1117] text-slate-200 p-4 md:p-8 font-sans selection:bg-indigo-500/30">
@@ -187,11 +311,25 @@ export default function App() {
       <audio 
         ref={audioRef} 
         src={musicSrc} 
-        loop 
+        // Loop only if using default or single track playlist? 
+        // Actually if we want to loop playlist, we shouldn't use loop attribute on audio tag
+        // We use onEnded to manually switch.
+        // But if playlist is empty (default), we want loop.
+        loop={playlist.length === 0} 
+        onEnded={() => {
+            if (playlist.length > 0) {
+                playNextTrack();
+            }
+        }}
         onError={() => {
           console.error("Audio error: Failed to load resource.");
           setAudioError(true);
-          setIsMusicPlaying(false);
+          // If error in playlist, try next
+          if (playlist.length > 0 && isMusicPlaying) {
+              setTimeout(() => playNextTrack(), 1000); // Small delay to avoid infinite error loop
+          } else {
+              setIsMusicPlaying(false);
+          }
         }}
       />
 
@@ -212,7 +350,7 @@ export default function App() {
              <button
               onClick={() => setIsSettingsOpen(true)}
               className="flex items-center justify-center p-2 text-gray-400 hover:text-white transition-colors border border-gray-700 hover:border-gray-500 rounded-md"
-              title="Settings"
+              title="Playlist Settings"
             >
               <Settings size={16} />
             </button>
@@ -398,11 +536,11 @@ export default function App() {
       {/* Settings Modal */}
       {isSettingsOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-          <div className="bg-[#161b22] border border-gray-700 rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between p-4 border-b border-gray-800">
+          <div className="bg-[#161b22] border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[85vh]">
+            <div className="flex items-center justify-between p-4 border-b border-gray-800 shrink-0">
               <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                <Settings size={18} className="text-indigo-400" />
-                Music Settings
+                <Music size={18} className="text-indigo-400" />
+                Playlist Manager
               </h2>
               <button 
                 onClick={() => {
@@ -415,47 +553,67 @@ export default function App() {
               </button>
             </div>
             
-            <div className="p-6 space-y-6">
+            <div className="p-6 space-y-6 overflow-y-auto flex-1 custom-scrollbar">
               
               <div className="space-y-3">
-                <div className="text-sm font-medium text-gray-400">Current Source</div>
-                <div className="flex items-center gap-3 p-3 bg-[#0d1117] rounded-lg border border-gray-800">
-                  <div className={`w-2 h-2 rounded-full ${isCustomMusic ? 'bg-indigo-400' : 'bg-gray-500'}`}></div>
-                  <span className="text-gray-200 text-sm truncate flex-1">
-                    {isCustomMusic ? 'Custom Uploaded File' : 'Default (bnova.mp3)'}
-                  </span>
+                <div className="flex justify-between items-center">
+                   <div className="text-sm font-medium text-gray-400">Current Queue</div>
+                   <span className="text-xs text-gray-500">{playlist.length} track(s)</span>
+                </div>
+                
+                <div className="bg-[#0d1117] rounded-lg border border-gray-800 overflow-hidden">
+                  {playlist.length === 0 ? (
+                    <div className="p-4 text-center text-sm text-gray-500 italic">
+                      Playlist is empty. Using default background music.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-gray-800/50">
+                      {playlist.map((track, idx) => (
+                        <div key={track.id} className={`p-3 flex items-center gap-3 hover:bg-white/5 transition-colors ${currentTrackIndex === idx && playlist.length > 0 ? 'bg-indigo-500/10' : ''}`}>
+                          <div className="text-gray-500 text-xs w-5 text-center shrink-0">
+                            {currentTrackIndex === idx ? <Play size={10} className="text-indigo-400 mx-auto fill-current" /> : idx + 1}
+                          </div>
+                          <div className={`text-sm truncate flex-1 ${currentTrackIndex === idx ? 'text-indigo-300 font-medium' : 'text-gray-300'}`}>
+                            {track.name}
+                          </div>
+                          <button 
+                            onClick={() => handleDeleteTrack(track.id)}
+                            className="p-1.5 text-gray-600 hover:text-red-400 hover:bg-red-900/20 rounded transition-colors"
+                            title="Remove from playlist"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="space-y-3">
-                <label className="block text-sm font-medium text-gray-400">Upload Custom Music (.mp3)</label>
+                <label className="block text-sm font-medium text-gray-400">Add to Playlist</label>
                 <div className="flex gap-2">
                   <label className="flex-1 cursor-pointer">
                     <input 
                       type="file" 
                       accept=".mp3,audio/mpeg" 
                       className="hidden" 
+                      multiple
                       onChange={handleFileUpload}
+                      disabled={isPlaylistLoading}
                     />
-                    <div className="flex items-center justify-center gap-2 w-full p-3 bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/30 border-dashed rounded-lg text-indigo-400 text-sm font-medium transition-all group">
-                      <Upload size={16} className="group-hover:scale-110 transition-transform" />
-                      <span>Choose File (Max 2.5MB)</span>
+                    <div className={`flex items-center justify-center gap-2 w-full p-3 bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/30 border-dashed rounded-lg text-indigo-400 text-sm font-medium transition-all group ${isPlaylistLoading ? 'opacity-50 cursor-wait' : ''}`}>
+                      {isPlaylistLoading ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-2 border-indigo-400 border-t-transparent" />
+                      ) : (
+                        <Upload size={16} className="group-hover:scale-110 transition-transform" />
+                      )}
+                      <span>{isPlaylistLoading ? "Processing..." : "Upload MP3s"}</span>
                     </div>
                   </label>
-                  
-                  {isCustomMusic && (
-                    <button 
-                      onClick={handleResetMusic}
-                      className="p-3 bg-red-900/20 hover:bg-red-900/30 border border-red-900/50 rounded-lg text-red-400 transition-colors"
-                      title="Reset to Default"
-                    >
-                      <Trash2 size={18} />
-                    </button>
-                  )}
                 </div>
                 <p className="text-xs text-gray-500 leading-relaxed">
-                  Files are converted to Base64 and stored in your browser's Local Storage. 
-                  Larger files may fail to save due to storage quotas.
+                  Songs are stored in your browser's IndexedDB. Storage limits depend on your available disk space.
                 </p>
               </div>
 
@@ -467,16 +625,38 @@ export default function App() {
               )}
             </div>
 
-            <div className="p-4 bg-[#0d1117] border-t border-gray-800 flex justify-end">
-              <button 
-                onClick={() => {
-                  setIsSettingsOpen(false);
-                  setUploadError(null);
-                }}
-                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm font-medium rounded-md transition-colors"
-              >
-                Close
-              </button>
+            <div className="p-4 bg-[#0d1117] border-t border-gray-800 flex justify-between items-center shrink-0">
+              <div className="text-xs text-gray-500 flex items-center gap-2">
+                {isMusicPlaying ? (
+                  <>
+                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                     Playing: <span className="text-gray-400 max-w-[150px] truncate">{currentTrackName}</span>
+                  </>
+                ) : (
+                  <span>Player Stopped</span>
+                )}
+              </div>
+              
+              <div className="flex gap-2">
+                {playlist.length > 0 && (
+                   <button 
+                    onClick={playNextTrack}
+                    className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm font-medium rounded-md transition-colors flex items-center gap-2"
+                    title="Next Track"
+                  >
+                    <SkipForward size={14} /> Next
+                  </button>
+                )}
+                <button 
+                  onClick={() => {
+                    setIsSettingsOpen(false);
+                    setUploadError(null);
+                  }}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-md transition-colors"
+                >
+                  Done
+                </button>
+              </div>
             </div>
           </div>
         </div>

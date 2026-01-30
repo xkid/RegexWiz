@@ -20,6 +20,9 @@ const SAMPLE_DATA = `2023-10-27 10:00:01 [INFO] User login: alice_doe (IP: 192.1
 2023-10-27 10:06:05 [WARN] High memory usage: 85%
 2023-10-27 10:15:00 [INFO] User logout: alice_doe`;
 
+// Absolute path to the file in the public directory
+const MUSIC_URL = "/bnova.mp3";
+
 export default function App() {
   const [inputData, setInputData] = useState<string>(SAMPLE_DATA);
   const [userPrompt, setUserPrompt] = useState<string>("Extract timestamps and log levels");
@@ -30,6 +33,7 @@ export default function App() {
   
   // Audio state
   const [isMusicPlaying, setIsMusicPlaying] = useState<boolean>(false);
+  const [audioError, setAudioError] = useState<boolean>(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   
   // To handle manual edits to the generated regex
@@ -67,16 +71,31 @@ export default function App() {
 
   const toggleMusic = () => {
     if (audioRef.current) {
+      // If previously errored, try reloading the source
+      if (audioError) {
+        audioRef.current.load();
+        setAudioError(false);
+      }
+
       if (isMusicPlaying) {
         audioRef.current.pause();
+        setIsMusicPlaying(false);
       } else {
-        audioRef.current.play().catch(e => {
-          console.error("Playback failed", e);
-          // Auto-play policy might block this if not triggered by user interaction, 
-          // but since this is inside an onClick handler, it should be fine.
-        });
+        const playPromise = audioRef.current.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              setIsMusicPlaying(true);
+              setError(null); // Clear any previous errors
+            })
+            .catch(() => {
+              // Strictly log a string to avoid circular JSON errors with event objects
+              console.error("Playback failed. File may be missing or format unsupported.");
+              setError("Failed to play music. Ensure 'bnova.mp3' is in the public folder.");
+              setIsMusicPlaying(false);
+            });
+        }
       }
-      setIsMusicPlaying(!isMusicPlaying);
     }
   };
 
@@ -95,7 +114,18 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0d1117] text-slate-200 p-4 md:p-8 font-sans selection:bg-indigo-500/30">
       {/* Background Audio */}
-      <audio ref={audioRef} src="bnova.mp3" loop />
+      <audio 
+        ref={audioRef} 
+        src={MUSIC_URL} 
+        loop 
+        // Removed crossOrigin="anonymous" as it is not needed for local public files and can cause issues
+        onError={() => {
+          // Strictly log a string to avoid circular JSON errors with event objects
+          console.error("Audio error: Failed to load resource.");
+          setAudioError(true);
+          setIsMusicPlaying(false);
+        }}
+      />
 
       <div className="max-w-7xl mx-auto space-y-6">
         
@@ -116,8 +146,11 @@ export default function App() {
               className={`flex items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors border rounded-md ${
                 isMusicPlaying 
                   ? "text-indigo-300 border-indigo-500/50 bg-indigo-500/10 hover:bg-indigo-500/20" 
-                  : "text-gray-400 border-gray-700 hover:border-gray-500 hover:text-white"
+                  : audioError 
+                    ? "text-red-400 border-red-900 hover:border-red-700 opacity-80"
+                    : "text-gray-400 border-gray-700 hover:border-gray-500 hover:text-white"
               }`}
+              title={audioError ? "Audio file missing or unsupported" : "Toggle Background Music"}
             >
               {isMusicPlaying ? <Volume2 size={14} /> : <VolumeX size={14} />}
               {isMusicPlaying ? "Music On" : "Music Off"}
@@ -129,6 +162,7 @@ export default function App() {
                 setUserPrompt("");
                 setRegexResult(null);
                 setManualRegex("");
+                setError(null);
               }}
               className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white transition-colors border border-gray-700 hover:border-gray-500 rounded-md"
             >

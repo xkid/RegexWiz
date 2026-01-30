@@ -1,0 +1,5 @@
+{
+  "name": "Regex Wizard",
+  "description": "An AI-powered utility that converts natural language prompts into Regular Expressions and visualizes matches against your data in real-time.",
+  "requestFramePermissions": []
+}

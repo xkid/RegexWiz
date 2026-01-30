@@ -12,7 +12,11 @@ import {
   Eraser,
   Play,
   Volume2,
-  VolumeX
+  VolumeX,
+  Settings,
+  Upload,
+  Trash2,
+  X
 } from 'lucide-react';
 
 const SAMPLE_DATA = `2023-10-27 10:00:01 [INFO] User login: alice_doe (IP: 192.168.1.45)
@@ -20,8 +24,10 @@ const SAMPLE_DATA = `2023-10-27 10:00:01 [INFO] User login: alice_doe (IP: 192.1
 2023-10-27 10:06:05 [WARN] High memory usage: 85%
 2023-10-27 10:15:00 [INFO] User logout: alice_doe`;
 
-// Absolute path to the file in the public directory
-const MUSIC_URL = "/bnova.mp3";
+const DEFAULT_MUSIC_URL = "/bnova.mp3";
+const STORAGE_KEY = "custom_bg_music";
+// 2.5MB limit to be safe with localStorage 5MB limit (Base64 is ~33% larger)
+const MAX_FILE_SIZE = 2.5 * 1024 * 1024; 
 
 export default function App() {
   const [inputData, setInputData] = useState<string>(SAMPLE_DATA);
@@ -32,9 +38,20 @@ export default function App() {
   const [copied, setCopied] = useState<boolean>(false);
   
   // Audio state
+  const [musicSrc, setMusicSrc] = useState<string>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY) || DEFAULT_MUSIC_URL;
+    } catch (e) {
+      return DEFAULT_MUSIC_URL;
+    }
+  });
   const [isMusicPlaying, setIsMusicPlaying] = useState<boolean>(false);
   const [audioError, setAudioError] = useState<boolean>(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  // Settings Modal State
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   
   // To handle manual edits to the generated regex
   const [manualRegex, setManualRegex] = useState<string>("");
@@ -71,7 +88,6 @@ export default function App() {
 
   const toggleMusic = () => {
     if (audioRef.current) {
-      // If previously errored, try reloading the source
       if (audioError) {
         audioRef.current.load();
         setAudioError(false);
@@ -86,16 +102,68 @@ export default function App() {
           playPromise
             .then(() => {
               setIsMusicPlaying(true);
-              setError(null); // Clear any previous errors
+              setError(null);
             })
             .catch(() => {
-              // Strictly log a string to avoid circular JSON errors with event objects
-              console.error("Playback failed. File may be missing or format unsupported.");
-              setError("Failed to play music. Ensure 'bnova.mp3' is in the public folder.");
+              console.error("Playback failed.");
+              setError("Failed to play music.");
               setIsMusicPlaying(false);
             });
         }
       }
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.type !== "audio/mpeg" && file.type !== "audio/mp3") {
+      setUploadError("Please upload a valid MP3 file.");
+      return;
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      setUploadError(`File is too large (${(file.size / 1024 / 1024).toFixed(2)}MB). Max size is 2.5MB for local storage.`);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const result = event.target?.result as string;
+      try {
+        localStorage.setItem(STORAGE_KEY, result);
+        setMusicSrc(result);
+        setUploadError(null);
+        // Stop playing if changing track
+        if (isMusicPlaying && audioRef.current) {
+          audioRef.current.pause();
+          setIsMusicPlaying(false);
+        }
+        setAudioError(false);
+      } catch (err) {
+        console.error("Storage error:", err);
+        setUploadError("Storage quota exceeded. The file is too large to save in your browser.");
+      }
+    };
+    reader.onerror = () => {
+        setUploadError("Failed to read file.");
+    }
+    reader.readAsDataURL(file);
+  };
+
+  const handleResetMusic = () => {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+      setMusicSrc(DEFAULT_MUSIC_URL);
+      setUploadError(null);
+      if (isMusicPlaying && audioRef.current) {
+        audioRef.current.pause();
+        setIsMusicPlaying(false);
+      }
+      setAudioError(false);
+    } catch (e) {
+      setUploadError("Failed to reset settings.");
     }
   };
 
@@ -111,16 +179,16 @@ export default function App() {
     }
   }, [manualRegex, manualFlags, inputData]);
 
+  const isCustomMusic = musicSrc !== DEFAULT_MUSIC_URL;
+
   return (
     <div className="min-h-screen bg-[#0d1117] text-slate-200 p-4 md:p-8 font-sans selection:bg-indigo-500/30">
       {/* Background Audio */}
       <audio 
         ref={audioRef} 
-        src={MUSIC_URL} 
+        src={musicSrc} 
         loop 
-        // Removed crossOrigin="anonymous" as it is not needed for local public files and can cause issues
         onError={() => {
-          // Strictly log a string to avoid circular JSON errors with event objects
           console.error("Audio error: Failed to load resource.");
           setAudioError(true);
           setIsMusicPlaying(false);
@@ -142,6 +210,14 @@ export default function App() {
           </div>
           <div className="flex gap-3">
              <button
+              onClick={() => setIsSettingsOpen(true)}
+              className="flex items-center justify-center p-2 text-gray-400 hover:text-white transition-colors border border-gray-700 hover:border-gray-500 rounded-md"
+              title="Settings"
+            >
+              <Settings size={16} />
+            </button>
+
+             <button
               onClick={toggleMusic}
               className={`flex items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors border rounded-md ${
                 isMusicPlaying 
@@ -150,7 +226,7 @@ export default function App() {
                     ? "text-red-400 border-red-900 hover:border-red-700 opacity-80"
                     : "text-gray-400 border-gray-700 hover:border-gray-500 hover:text-white"
               }`}
-              title={audioError ? "Audio file missing or unsupported" : "Toggle Background Music"}
+              title={audioError ? "Audio source error" : "Toggle Background Music"}
             >
               {isMusicPlaying ? <Volume2 size={14} /> : <VolumeX size={14} />}
               {isMusicPlaying ? "Music On" : "Music Off"}
@@ -171,6 +247,7 @@ export default function App() {
           </div>
         </header>
 
+        {/* Main Content Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-full">
           
           {/* Left Column: Inputs */}
@@ -317,6 +394,93 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Settings Modal */}
+      {isSettingsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-[#161b22] border border-gray-700 rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-4 border-b border-gray-800">
+              <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                <Settings size={18} className="text-indigo-400" />
+                Music Settings
+              </h2>
+              <button 
+                onClick={() => {
+                  setIsSettingsOpen(false);
+                  setUploadError(null);
+                }}
+                className="text-gray-400 hover:text-white transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6 space-y-6">
+              
+              <div className="space-y-3">
+                <div className="text-sm font-medium text-gray-400">Current Source</div>
+                <div className="flex items-center gap-3 p-3 bg-[#0d1117] rounded-lg border border-gray-800">
+                  <div className={`w-2 h-2 rounded-full ${isCustomMusic ? 'bg-indigo-400' : 'bg-gray-500'}`}></div>
+                  <span className="text-gray-200 text-sm truncate flex-1">
+                    {isCustomMusic ? 'Custom Uploaded File' : 'Default (bnova.mp3)'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <label className="block text-sm font-medium text-gray-400">Upload Custom Music (.mp3)</label>
+                <div className="flex gap-2">
+                  <label className="flex-1 cursor-pointer">
+                    <input 
+                      type="file" 
+                      accept=".mp3,audio/mpeg" 
+                      className="hidden" 
+                      onChange={handleFileUpload}
+                    />
+                    <div className="flex items-center justify-center gap-2 w-full p-3 bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/30 border-dashed rounded-lg text-indigo-400 text-sm font-medium transition-all group">
+                      <Upload size={16} className="group-hover:scale-110 transition-transform" />
+                      <span>Choose File (Max 2.5MB)</span>
+                    </div>
+                  </label>
+                  
+                  {isCustomMusic && (
+                    <button 
+                      onClick={handleResetMusic}
+                      className="p-3 bg-red-900/20 hover:bg-red-900/30 border border-red-900/50 rounded-lg text-red-400 transition-colors"
+                      title="Reset to Default"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  Files are converted to Base64 and stored in your browser's Local Storage. 
+                  Larger files may fail to save due to storage quotas.
+                </p>
+              </div>
+
+              {uploadError && (
+                <div className="p-3 bg-red-900/20 border border-red-900/50 rounded-lg flex items-start gap-2 text-sm text-red-400">
+                  <AlertCircle size={16} className="shrink-0 mt-0.5" />
+                  <span>{uploadError}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 bg-[#0d1117] border-t border-gray-800 flex justify-end">
+              <button 
+                onClick={() => {
+                  setIsSettingsOpen(false);
+                  setUploadError(null);
+                }}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm font-medium rounded-md transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
